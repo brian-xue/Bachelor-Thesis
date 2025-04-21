@@ -57,8 +57,8 @@ static uint64_t total_packets = 0;
 
 /* Define math header format */
 typedef struct __attribute__((packed)) {
-    int16_t a;
-    int16_t b;
+    uint16_t a;
+    uint16_t b;
     int32_t res;
     char timestamp[6]; /* 6 bytes for timestamp */
 } math_header_t;
@@ -67,16 +67,16 @@ struct rte_mempool *traffic_pktmbuf_pool = NULL;
 static struct rte_eth_dev_tx_buffer *tx_buffer;
 
 /* Ethernet addresses of ports */
-static struct rte_ether_addr src_mac_addr = {{0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC}};
-static struct rte_ether_addr dst_mac_addr = {{0xDE, 0xAD, 0xBE, 0xEF, 0x12, 0x34}};
+static struct rte_ether_addr src_mac_addr = {{0xB8, 0x3F, 0xD2, 0x54, 0xBC, 0x6A}};
+static struct rte_ether_addr dst_mac_addr = {{0xB8, 0x3F, 0xD2, 0x19, 0x77, 0xEE}};
 
 /* IP addresses */
-static uint32_t src_ip = RTE_IPV4(192, 168, 1, 1);
-static uint32_t dst_ip = RTE_IPV4(192, 168, 1, 2);
+static uint32_t src_ip = RTE_IPV4(192, 168, 100, 2);
+static uint32_t dst_ip = RTE_IPV4(192, 168, 100, 105);
 
 /* UDP ports */
-static uint16_t src_port = 12345;
-static uint16_t dst_port = 54321;
+static uint16_t src_port = 8000;
+static uint16_t dst_port = 8000;
 
 static struct rte_eth_conf port_conf = {
     .rxmode = {
@@ -234,7 +234,7 @@ static struct rte_mbuf *create_packet(void)
     ip_hdr->packet_id = rte_cpu_to_be_16(0);
     ip_hdr->fragment_offset = rte_cpu_to_be_16(0);
     ip_hdr->time_to_live = 64;
-    ip_hdr->next_proto_id = IPPROTO_UDP;
+    ip_hdr->next_proto_id = 0xF9;
     ip_hdr->src_addr = rte_cpu_to_be_32(src_ip);
     ip_hdr->dst_addr = rte_cpu_to_be_32(dst_ip);
     ip_hdr->hdr_checksum = 0;
@@ -248,8 +248,8 @@ static struct rte_mbuf *create_packet(void)
     
     /* Set up the math header */
     math_hdr = (math_header_t *)(udp_hdr + 1);
-    math_hdr->a = rte_cpu_to_be_16((int16_t)(rte_rand() % 9000));
-    math_hdr->b = rte_cpu_to_be_16((int16_t)(rte_rand() % 9000));
+    math_hdr->a = rte_cpu_to_be_16((uint16_t)(rte_rand() % 5000));
+    math_hdr->b = rte_cpu_to_be_16((uint16_t)(rte_rand() % 5000));
     math_hdr->res = 0;
     
     /* If the packet length is greater than headers + math_header, fill the rest with padding */
@@ -341,6 +341,7 @@ static int parse_args(int argc, char **argv)
         case 'n':
             total_traffic = parse_traffic_size(optarg);
             total_packets = total_traffic / pkt_len;
+            // printf("Total traffic: %lu bytes, %lu packets\n", total_traffic, total_packets);
             if (total_packets == 0) {
                 printf("Invalid total traffic: %s\n", optarg);
                 usage(prgname);

@@ -60,7 +60,7 @@ typedef struct __attribute__((packed)) {
     uint16_t a;
     uint16_t b;
     int32_t res;
-    char timestamp[6]; /* 6 bytes for timestamp */
+    uint64_t timestamp; 
 } math_header_t;
 
 struct rte_mempool *traffic_pktmbuf_pool = NULL;
@@ -77,6 +77,12 @@ static uint32_t dst_ip = RTE_IPV4(192, 168, 100, 105);
 /* UDP ports */
 static uint16_t src_port = 8000;
 static uint16_t dst_port = 8000;
+
+#define MAX_PKT_NUM 100000
+
+int pkt_idx = 0;
+
+math_header_t math_info[MAX_PKT_NUM];
 
 static struct rte_eth_conf port_conf = {
     .rxmode = {
@@ -188,6 +194,8 @@ void init_port(int portid)
         rte_exit(EXIT_FAILURE, "rte_eth_dev_start:err=%d, port=%u\n",
                  ret, portid);
 
+    rte_eth_promiscuous_enable(portid);
+
     rte_log(RTE_LOG_DEBUG, RTE_LOGTYPE_TRAFFIC_GEN, "Initialize port %u done.\n", portid);
 }
 
@@ -251,6 +259,7 @@ static struct rte_mbuf *create_packet(void)
     math_hdr->a = rte_cpu_to_be_16((uint16_t)(rte_rand() % 5000));
     math_hdr->b = rte_cpu_to_be_16((uint16_t)(rte_rand() % 5000));
     math_hdr->res = 0;
+    math_hdr->timestamp = 0;
     
     /* If the packet length is greater than headers + math_header, fill the rest with padding */
     if (pkt_data_len > sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + 
@@ -362,6 +371,24 @@ static int parse_args(int argc, char **argv)
     return 0;
 }
 
+static void analyze_info()
+{
+    FILE *fp = fopen("math_info.txt", "w");
+    if (fp == NULL)
+    {
+        printf("Error opening file for writing\n");
+        return;
+    }
+
+    for (int i = 0; i < pkt_idx; i++)
+    {
+        fprintf(fp, "%d %d %d %lu\n", rte_be_to_cpu_16(math_info[i].a) , rte_be_to_cpu_16(math_info[i].b), rte_be_to_cpu_32(math_info[i].res),rte_be_to_cpu_64(math_info[i].timestamp));
+    }
+
+    fclose(fp);
+    printf("time stamp of the 1000th pkt: %lu\n", math_info[999].timestamp);
+}
+
 static void traffic_generator_main_loop(uint16_t port_id)
 {
     struct rte_mbuf *pkts[MAX_PKT_BURST];
@@ -402,17 +429,17 @@ static void traffic_generator_main_loop(uint16_t port_id)
         }
         
         /* Report progress periodically */
-        current_tsc = rte_rdtsc();
-        if (current_tsc - last_report_tsc > report_interval_tsc) {
-            duration_sec = (float)(current_tsc - start_tsc) / rte_get_tsc_hz();
-            printf("Progress: %.2f%% (%lu/%lu packets sent, %.2f Mpps)\n", 
-                   (float)total_sent / total_packets * 100.0,
-                   total_sent, total_packets,
-                   packets_sent / 1000000.0 / (float)(current_tsc - last_report_tsc) * rte_get_tsc_hz());
+        // current_tsc = rte_rdtsc();
+        // if (current_tsc - last_report_tsc > report_interval_tsc) {
+        //     duration_sec = (float)(current_tsc - start_tsc) / rte_get_tsc_hz();
+        //     printf("Progress: %.2f%% (%lu/%lu packets sent, %.2f Mpps)\n", 
+        //            (float)total_sent / total_packets * 100.0,
+        //            total_sent, total_packets,
+        //            packets_sent / 1000000.0 / (float)(current_tsc - last_report_tsc) * rte_get_tsc_hz());
             
-            packets_sent = 0;
-            last_report_tsc = current_tsc;
-        }
+        //     packets_sent = 0;
+        //     last_report_tsc = current_tsc;
+        // }
     }
     
     duration_sec = (float)(rte_rdtsc() - start_tsc) / rte_get_tsc_hz();
@@ -420,9 +447,59 @@ static void traffic_generator_main_loop(uint16_t port_id)
            total_sent, duration_sec, total_sent / 1000000.0 / duration_sec);
 }
 
+static traffic_receiver_main_loop(uint16_t port_id)
+{
+    struct rte_mbuf *pkts[MAX_PKT_BURST];
+    uint16_t received;
+    
+
+    
+    while (!force_quit) {
+        
+        /* receive packets */
+        received = rte_eth_rx_burst(port_id, 0, pkts, MAX_PKT_BURST);
+        if (received == 0)
+            continue;
+        for (int i = 0; i < received; i++) {
+            struct rte_ether_hdr *eth_hdr;
+            struct rte_ipv4_hdr *ip_hdr;
+            struct rte_udp_hdr *udp_hdr;
+            math_header_t *math_hdr;
+
+            eth_hdr = rte_pktmbuf_mtod(pkts[i], struct rte_ether_hdr *);
+            ip_hdr = (struct rte_ipv4_hdr *)(eth_hdr + 1);
+            if (ip_hdr->next_proto_id != 0xF9) {
+                /* Not a UDP packet, free the mbuf */
+                rte_pktmbuf_free(pkts[i]);
+                continue;
+            }
+            udp_hdr = (struct rte_udp_hdr *)(ip_hdr + 1);
+            math_hdr = (math_header_t *)(udp_hdr + 1);
+
+            /* Store the math header information */
+            math_info[pkt_idx].a = math_hdr->a; // need to convert to host byte order
+            math_info[pkt_idx].b = math_hdr->b; // need to convert to host byte order
+            math_info[pkt_idx].res = math_hdr->res;
+            math_info[pkt_idx].timestamp = math_hdr->timestamp;
+            
+            pkt_idx++;
+
+            /* Free the packet */
+            rte_pktmbuf_free(pkts[i]);
+        }                      
+    }
+    analyze_info();
+}
+
 static int generator_launch_one_lcore(__attribute__((unused)) void *dummy)
 {
     traffic_generator_main_loop(0); /* Always use first port */
+    return 0;
+}
+
+static int traffic_receiver_launch_one_lcore(__attribute__((unused)) void *dummy)
+{
+    traffic_receiver_main_loop(0); /* Always use first port */
     return 0;
 }
 
@@ -497,8 +574,17 @@ int main(int argc, char **argv)
     if (rte_eal_remote_launch(generator_launch_one_lcore, NULL, generator_lcore_id) < 0)
         rte_exit(EXIT_FAILURE, "Cannot launch generator on lcore\n");
 
+    /* Launch traffic receiver on a slave core */
+    uint32_t rx_core_lcore_id = rte_get_next_lcore(generator_lcore_id, true, false);
+    if (rte_eal_remote_launch(traffic_receiver_launch_one_lcore, NULL, rx_core_lcore_id) < 0)
+        rte_exit(EXIT_FAILURE, "Cannot launch receiver on lcore\n");
+
     /* Wait for traffic generator to complete */
     if (rte_eal_wait_lcore(generator_lcore_id) < 0)
+        ret = -1;
+
+    /* Wait for traffic receiver to complete */
+    if (rte_eal_wait_lcore(rx_core_lcore_id) < 0)
         ret = -1;
 
     /* Display statistics */

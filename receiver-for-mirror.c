@@ -44,37 +44,58 @@ static uint16_t nb_txd = RTE_TEST_TX_DESC_DEFAULT;
 #define DEFAULT_PKT_LEN 512
 #define DEFAULT_TOTAL_TRAFFIC "1M"
 
+#define MAX_PKT_NUM 10000
+
 int RTE_LOGTYPE_TRAFFIC_GEN;
 uint32_t TRAFFIC_GEN_LOG_LEVEL = RTE_LOG_DEBUG;
-#define APP "traffic-gen"
+#define APP "traffic-receiver"
 
 static volatile bool force_quit;
 
 /* Options for packet generation */
 static uint16_t pkt_len = DEFAULT_PKT_LEN;
-static uint64_t total_traffic = 10000000; /* Default 10M bytes */
+// static uint64_t total_traffic = 10000000; /* Default 10M bytes */
 static uint64_t total_packets = 0; 
+static uint32_t traffic_pkt_idx = 0;
+static uint32_t gen_pkt_idx = 0;
+// static rte_atomic32_t gen_pkt_idx;
 
 /* Define math header format */
 typedef struct __attribute__((packed)) {
-    uint32_t flag; // 4 types
-    uint64_t timestamp; // 8 bytes
+    int32_t flag;
+    uint64_t timestamp; /* 6 bytes for timestamp */
 } flag_header_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t flag;
+    uint32_t notify;
+    uint64_t timestamp; 
+} notify_header_t;
+
+
+/* Information Collection array */
+flag_header_t traffic_pkt_info[MAX_PKT_NUM];
+notify_header_t gen_pkt_info[MAX_PKT_NUM];
 
 struct rte_mempool *traffic_pktmbuf_pool = NULL;
 static struct rte_eth_dev_tx_buffer *tx_buffer;
 
 /* Ethernet addresses of ports */
-static struct rte_ether_addr src_mac_addr = {{0xB8, 0x3F, 0xD2, 0x54, 0xBC, 0x6A}};
-static struct rte_ether_addr dst_mac_addr = {{0xB8, 0x3F, 0xD2, 0x19, 0x77, 0xEE}};
+static struct rte_ether_addr src_mac_addr = {{0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC}};
+static struct rte_ether_addr dst_mac_addr = {{0xDE, 0xAD, 0xBE, 0xEF, 0x12, 0x34}};
 
 /* IP addresses */
-static uint32_t src_ip = RTE_IPV4(192, 168, 100, 2);
-static uint32_t dst_ip = RTE_IPV4(192, 168, 100, 105);
+static uint32_t src_ip = RTE_IPV4(192, 168, 1, 1);
+static uint32_t dst_ip = RTE_IPV4(192, 168, 100, 2);
 
 /* UDP ports */
-static uint16_t src_port = 8000;
-static uint16_t dst_port = 8000;
+static uint16_t src_port = 12345;
+static uint16_t dst_port = 54321;
+
+/* Ring Queues */
+struct  rte_ring *traffic_pkt_ring = NULL;
+struct rte_ring *gen_pkt_ring = NULL;
+
 
 static struct rte_eth_conf port_conf = {
     .rxmode = {
@@ -108,6 +129,11 @@ void print_eth_dev_info(int portid) {
     printf("  Min MTU: %u\n", dev_info.min_mtu);
     printf("  Driver name: %s\n", dev_info.driver_name);
 }
+
+// void init_gen_pkt_idx() {
+//     rte_atomic32_init(&gen_pkt_idx);
+//     rte_atomic32_set(&gen_pkt_idx, 0);
+// }
 
 void init_port(int portid)
 {
@@ -158,6 +184,8 @@ void init_port(int portid)
         rte_exit(EXIT_FAILURE, "rte_eth_rx_queue_setup:err=%d, port=%u\n",
                  ret, portid);
 
+    
+
     /* init one TX queue on each port */
     fflush(stdout);
     txq_conf = dev_info.default_txconf;
@@ -186,90 +214,22 @@ void init_port(int portid)
         rte_exit(EXIT_FAILURE, "rte_eth_dev_start:err=%d, port=%u\n",
                  ret, portid);
 
+    rte_eth_promiscuous_enable(portid);
+
     rte_log(RTE_LOG_DEBUG, RTE_LOGTYPE_TRAFFIC_GEN, "Initialize port %u done.\n", portid);
 }
 
-/* Create a single packet with the specified format */
-static struct rte_mbuf *create_packet(uint32_t flag)
-{
-    struct rte_mbuf *m;
-    struct rte_ether_hdr *eth_hdr;
-    struct rte_ipv4_hdr *ip_hdr;
-    struct rte_udp_hdr *udp_hdr;
-    flag_header_t *flag_header;
-    uint16_t pkt_data_len;
-    uint16_t math_data_len;
-    uint16_t udp_length;
-    char *payload;
 
-    /* Calculate header sizes and data length */
-    math_data_len = sizeof(flag_header_t);
-    udp_length = sizeof(struct rte_udp_hdr) + math_data_len;
-    
-    /* Add padding if needed to meet the minimum packet length */
-    pkt_data_len = pkt_len;
-    
-    /* Allocate the packet */
-    m = rte_pktmbuf_alloc(traffic_pktmbuf_pool);
-    if (m == NULL)
-        return NULL;
-    
-    /* Set up the packet size */
-    rte_pktmbuf_append(m, pkt_data_len);
-    
-    /* Set up the Ethernet header */
-    eth_hdr = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
-    rte_ether_addr_copy(&src_mac_addr, &eth_hdr->src_addr);
-    rte_ether_addr_copy(&dst_mac_addr, &eth_hdr->dst_addr);
-    eth_hdr->ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4);
-    
-    /* Set up the IP header */
-    ip_hdr = (struct rte_ipv4_hdr *)(eth_hdr + 1);
-    memset(ip_hdr, 0, sizeof(*ip_hdr));
-    ip_hdr->version_ihl = RTE_IPV4_VHL_DEF;
-    ip_hdr->type_of_service = 0;
-    ip_hdr->total_length = rte_cpu_to_be_16(sizeof(struct rte_ipv4_hdr) + udp_length);
-    ip_hdr->packet_id = rte_cpu_to_be_16(0);
-    ip_hdr->fragment_offset = rte_cpu_to_be_16(0);
-    ip_hdr->time_to_live = 64;
-    ip_hdr->next_proto_id = 0xF9;
-    ip_hdr->src_addr = rte_cpu_to_be_32(src_ip);
-    ip_hdr->dst_addr = rte_cpu_to_be_32(dst_ip);
-    ip_hdr->hdr_checksum = 0;
-    
-    /* Set up the UDP header */
-    udp_hdr = (struct rte_udp_hdr *)(ip_hdr + 1);
-    udp_hdr->src_port = rte_cpu_to_be_16(src_port);
-    udp_hdr->dst_port = rte_cpu_to_be_16(dst_port);
-    udp_hdr->dgram_len = rte_cpu_to_be_16(udp_length);
-    udp_hdr->dgram_cksum = 0;
-    
-    /* Set up the math header */
-    flag_header = (flag_header_t *)(udp_hdr + 1);
-    flag_header->flag = rte_cpu_to_be_32(flag); // Set the flag value
-    flag_header->timestamp = 0; // Set the timestamp
-    
-    
-    /* If the packet length is greater than headers + math_header, fill the rest with padding */
-    if (pkt_data_len > sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + 
-        sizeof(struct rte_udp_hdr) + sizeof(flag_header_t)) {
-        
-        payload = (char *)(flag_header + 1);
-        size_t padding_size = pkt_data_len - (sizeof(struct rte_ether_hdr) + 
-                             sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr) + 
-                             sizeof(flag_header_t));
-        
-        /* Fill the padding with a pattern */
-        memset(payload, 0xAB, padding_size);
+void init_rings() {
+    traffic_pkt_ring = rte_ring_create("traffic_pkt_ring", MAX_RING_SIZE, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
+    if (traffic_pkt_ring == NULL) {
+        rte_exit(EXIT_FAILURE, "Cannot create traffic packet ring\n");
     }
-    
-    /* Set offload flags if hardware supports checksum calculation */
-    m->l2_len = sizeof(struct rte_ether_hdr);
-    m->l3_len = sizeof(struct rte_ipv4_hdr);
-    m->l4_len = sizeof(struct rte_udp_hdr);
-    m->ol_flags = RTE_MBUF_F_TX_IPV4 | RTE_MBUF_F_TX_IP_CKSUM | RTE_MBUF_F_TX_UDP_CKSUM;
-    
-    return m;
+
+    gen_pkt_ring = rte_ring_create("gen_pkt_ring", CONSTRUCT_UDP_RING_SIZE, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ);
+    if (gen_pkt_ring == NULL) {
+        rte_exit(EXIT_FAILURE, "Cannot create generator packet ring\n");
+    }
 }
 
 /* Convert traffic size string to number of packets */
@@ -310,105 +270,174 @@ static void usage(const char *prgname)
            prgname);
 }
 
-static int parse_args(int argc, char **argv)
+uint64_t transferring_timestamp(char *timestamp)
 {
-    int opt;
-    char **argvopt;
-    int option_index;
-    char *prgname = argv[0];
-    static struct option lgopts[] = {
-        {NULL, 0, 0, 0}
-    };
-
-    argvopt = argv;
-
-    while ((opt = getopt_long(argc, argvopt, "m:n:",
-                  lgopts, &option_index)) != EOF) {
-
-        switch (opt) {
-        case 'm':
-            pkt_len = (uint16_t)atoi(optarg);
-            if (pkt_len < 64 || pkt_len > MAX_PKT_SIZE) {
-                printf("Invalid packet length: %u (must be between 64 and %u)\n",
-                       pkt_len, MAX_PKT_SIZE);
-                usage(prgname);
-                return -1;
-            }
-            break;
-
-        case 'n':
-            total_traffic = parse_traffic_size(optarg);
-            total_packets = total_traffic / pkt_len;
-            // printf("Total traffic: %lu bytes, %lu packets\n", total_traffic, total_packets);
-            if (total_packets == 0) {
-                printf("Invalid total traffic: %s\n", optarg);
-                usage(prgname);
-                return -1;
-            }
-            break;
-
-        default:
-            usage(prgname);
-            return -1;
-        }
+    uint64_t ts = 0;
+    for (int i = 0; i < 6; i++)
+    {
+        ts = ts << 8;
+        ts += (uint64_t)timestamp[i];
     }
-
-    if (optind >= 0)
-        argv[optind-1] = prgname;
-
-    optind = 1; /* reset getopt lib */
-    return 0;
+    return ts;
 }
 
-static void traffic_generator_main_loop(uint16_t port_id)
+/* analyze the information from the information collection array, and save in a txt file */
+static void analyze_traffic_info()
 {
+    FILE *fp = fopen("traffic_pkt_info.txt", "w");
+    if (fp == NULL)
+    {
+        printf("Error opening file for writing\n");
+        return;
+    }
+
+    for (int i = 0; i < traffic_pkt_idx; i++)
+    {
+        fprintf(fp, "%u %lu\n", rte_be_to_cpu_32(traffic_pkt_info[i].flag), rte_be_to_cpu_64(traffic_pkt_info[i].timestamp));
+    }
+
+    fclose(fp);
+}
+
+static void analyze_gen_info()
+{
+    FILE *fp = fopen("gen_pkt_info.txt", "w");
+    if (fp == NULL)
+    {
+        printf("Error opening file for writing\n");
+        return;
+    }
+    for (int i = 0; i < gen_pkt_idx; i++)
+    {
+        fprintf(fp, "%u %u %lu\n", rte_be_to_cpu_32(gen_pkt_info[i].flag), rte_be_to_cpu_32(gen_pkt_info[i].notify), rte_be_to_cpu_64(gen_pkt_info[i].timestamp));
+    }
+    fclose(fp);
+}
+
+// static int parse_args(int argc, char **argv);
+
+
+static void receive_packets_main_loop(uint16_t port_id)
+{
+    uint16_t received;
     struct rte_mbuf *pkts[MAX_PKT_BURST];
-    uint16_t sent;
-    uint64_t packets_sent = 0;
-    uint64_t total_sent = 0;
-    uint64_t start_tsc, current_tsc, last_report_tsc;
-    const uint64_t report_interval_tsc = rte_get_tsc_hz(); /* 1 second */
-    float duration_sec;
-    
-    printf("Starting packet generation. Sending %lu packets of size %u bytes...\n", 
-           total_packets, pkt_len);
-    
-    start_tsc = rte_rdtsc();
-    last_report_tsc = start_tsc;
-    
-    while (!force_quit && total_sent < total_packets) {
-        /* Create a burst of packets */
-        uint16_t nb_pkts = RTE_MIN(MAX_PKT_BURST, total_packets - total_sent);
-        
-        for (int i = 0; i < nb_pkts; i++) {
-            uint32_t flag = rte_rand() % 4; // Random flag value (0-3)
-            pkts[i] = create_packet(flag);
-            if (pkts[i] == NULL) {
-                rte_exit(EXIT_FAILURE, "Failed to allocate packet\n");
-            }
+    struct rte_ether_hdr *eth_hdr;
+    struct rte_ipv4_hdr *ip_hdr;
+    return;
+    while (!force_quit)
+    {
+        /* receive packets */
+        received = rte_eth_rx_burst(port_id, 0, pkts, MAX_PKT_BURST);
+        if (received == 0)
+            continue;
+        for (int i = 0; i < received; i++) {
+        eth_hdr = rte_pktmbuf_mtod(pkts[i], struct rte_ether_hdr *);
+        ip_hdr = (struct rte_ipv4_hdr *)(eth_hdr + 1);
+
+        if (ip_hdr->next_proto_id == 0xf9){ // traffic packet
+            rte_ring_enqueue(traffic_pkt_ring, pkts[i]);
         }
-        
-        /* Send the burst */
-        sent = rte_eth_tx_burst(port_id, 0, pkts, nb_pkts);
-        packets_sent += sent;
-        total_sent += sent;
-        
-        /* Free unsent packets if any */
-        if (unlikely(sent < nb_pkts)) {
-            for (uint16_t i = sent; i < nb_pkts; i++) {
-                rte_pktmbuf_free(pkts[i]);
-            }
+        else if (ip_hdr->next_proto_id == 0xFA){ // new generate packet
+            rte_ring_enqueue(gen_pkt_ring, pkts[i]);
         }
+        else {
+            /* Not a UDP packet, free the mbuf */
+            rte_pktmbuf_free(pkts[i]);
+            continue;
+        }
+        }      
     }
     
-    duration_sec = (float)(rte_rdtsc() - start_tsc) / rte_get_tsc_hz();
-    printf("Traffic generation complete. Sent %lu packets in %.2f seconds (%.2f Mpps)\n", 
-           total_sent, duration_sec, total_sent / 1000000.0 / duration_sec);
+}
+
+static void receive_traffic_main_loop(uint16_t port_id){
+    struct rte_mbuf *pkts[MAX_PKT_BURST];
+    uint16_t received;
+    
+
+    return;
+    while (!force_quit) {
+        
+        /* receive packets */
+        received = rte_ring_dequeue_burst(traffic_pkt_ring, (void **)pkts, MAX_PKT_BURST, NULL);
+        if (received == 0)
+            continue;
+        for (int i = 0; i < received; i++) {
+            struct rte_ether_hdr *eth_hdr;
+            struct rte_ipv4_hdr *ip_hdr;
+            struct rte_udp_hdr *udp_hdr;
+            flag_header_t *flag_hdr;
+
+            eth_hdr = rte_pktmbuf_mtod(pkts[i], struct rte_ether_hdr *);
+            ip_hdr = (struct rte_ipv4_hdr *)(eth_hdr + 1);
+            udp_hdr = (struct rte_udp_hdr *)(ip_hdr + 1);
+            flag_hdr = (flag_header_t *)(udp_hdr + 1);
+
+            /* Store the math header information */
+            traffic_pkt_info[traffic_pkt_idx].flag =  flag_hdr->flag;// need to convert to host byte order
+            traffic_pkt_info[traffic_pkt_idx].timestamp = flag_hdr->timestamp;
+            
+            traffic_pkt_idx++;
+
+            /* Free the packet */
+            rte_pktmbuf_free(pkts[i]);
+        }                      
+    }
+    analyze_traffic_info();
+}
+
+static void receive_gen_packets_main_loop(uint16_t port_id){
+    struct rte_mbuf *pkts[MAX_PKT_BURST];
+    uint16_t received;
+    
+    while (!force_quit) {
+        
+        /* receive packets */
+        // received = rte_ring_dequeue_burst(gen_pkt_ring, (void **)pkts, MAX_PKT_BURST, NULL);
+        received = rte_eth_rx_burst(port_id, 0, pkts, MAX_PKT_BURST);
+        if (received == 0)
+            continue;
+        for (int i = 0; i < received; i++) {
+            struct rte_ether_hdr *eth_hdr;
+            struct rte_ipv4_hdr *ip_hdr;
+            struct rte_udp_hdr *udp_hdr;
+            notify_header_t *noti_hdr;
+
+            eth_hdr = rte_pktmbuf_mtod(pkts[i], struct rte_ether_hdr *);
+            ip_hdr = (struct rte_ipv4_hdr *)(eth_hdr + 1);
+            udp_hdr = (struct rte_udp_hdr *)(ip_hdr + 1);
+            noti_hdr = (notify_header_t *)(udp_hdr + 1);
+
+            /* Store the math header information */
+            gen_pkt_info[gen_pkt_idx].flag =  noti_hdr->flag;// need to convert to host byte order
+            gen_pkt_info[gen_pkt_idx].notify = noti_hdr->notify;
+            gen_pkt_info[gen_pkt_idx].timestamp = noti_hdr->timestamp;
+            
+            gen_pkt_idx++;
+
+            /* Free the packet */
+            // rte_pktmbuf_free(pkts[i]);
+        }             
+        rte_pktmbuf_free_bulk(pkts, received);         
+    }
+    analyze_gen_info();
 }
 
 static int generator_launch_one_lcore(__attribute__((unused)) void *dummy)
 {
-    traffic_generator_main_loop(0); /* Always use first port */
+    receive_packets_main_loop(0); /* Always use first port */
+    return 0;
+}
+
+static int receiver_launch_one_lcore(__attribute__((unused)) void *dummy)
+{
+    receive_traffic_main_loop(0); /* Always use first port */
+    return 0;
+}
+
+static int gen_pkt_launch_one_lcore(__attribute__((unused)) void *dummy)
+{
+    receive_gen_packets_main_loop(0); /* Always use first port */
     return 0;
 }
 
@@ -428,9 +457,6 @@ int main(int argc, char **argv)
     argv += ret;
 
     /* Parse application-specific arguments */
-    ret = parse_args(argc, argv);
-    if (ret < 0)
-        rte_exit(EXIT_FAILURE, "Invalid application arguments\n");
 
     /* Register a log type for the application */
     RTE_LOGTYPE_TRAFFIC_GEN = rte_log_register(APP);
@@ -478,13 +504,34 @@ int main(int argc, char **argv)
            src_mac_addr.addr_bytes[2], src_mac_addr.addr_bytes[3],
            src_mac_addr.addr_bytes[4], src_mac_addr.addr_bytes[5]);
 
+    /* Initialize rings */
+    init_rings();
+
     /* Launch traffic generator on a slave core */
     generator_lcore_id = rte_get_next_lcore(rte_lcore_id(), true, false);
     if (rte_eal_remote_launch(generator_launch_one_lcore, NULL, generator_lcore_id) < 0)
         rte_exit(EXIT_FAILURE, "Cannot launch generator on lcore\n");
 
+    /* Launch receiver on a slave core */
+    unsigned int receiver_lcore_id = rte_get_next_lcore(generator_lcore_id, true, false);
+    if (rte_eal_remote_launch(receiver_launch_one_lcore, NULL, receiver_lcore_id) < 0)
+        rte_exit(EXIT_FAILURE, "Cannot launch receiver on lcore\n");
+
+    /* Launch generator packet receiver on a slave core */
+    unsigned int gen_pkt_lcore_id = rte_get_next_lcore(receiver_lcore_id, true, false);
+    if (rte_eal_remote_launch(gen_pkt_launch_one_lcore, NULL, gen_pkt_lcore_id) < 0)
+        rte_exit(EXIT_FAILURE, "Cannot launch generator packet receiver on lcore\n");
+
     /* Wait for traffic generator to complete */
     if (rte_eal_wait_lcore(generator_lcore_id) < 0)
+        ret = -1;
+
+    /* Wait for receiver to complete */
+    if (rte_eal_wait_lcore(receiver_lcore_id) < 0)
+        ret = -1;
+
+    /* Wait for generator packet receiver to complete */
+    if (rte_eal_wait_lcore(gen_pkt_lcore_id) < 0)
         ret = -1;
 
     /* Display statistics */

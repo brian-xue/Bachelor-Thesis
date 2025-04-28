@@ -65,10 +65,16 @@ typedef struct __attribute__((packed)) {
     uint64_t timestamp; /* 6 bytes for timestamp */
 } flag_header_t;
 
+typedef struct __attribute__((packed)) {
+    uint32_t flag;
+    uint32_t notify;
+    uint64_t timestamp; 
+} notify_header_t;
+
 
 /* Information Collection array */
 flag_header_t traffic_pkt_info[MAX_PKT_NUM];
-flag_header_t gen_pkt_info[MAX_PKT_NUM];
+notify_header_t gen_pkt_info[MAX_PKT_NUM];
 
 struct rte_mempool *traffic_pktmbuf_pool = NULL;
 static struct rte_eth_dev_tx_buffer *tx_buffer;
@@ -281,7 +287,7 @@ static void analyze_traffic_info()
 
     for (int i = 0; i < traffic_pkt_idx; i++)
     {
-        fprintf(fp, "%u %lu\n", rte_be_to_cpu_16(traffic_pkt_info[i].flag), rte_be_to_cpu_64(traffic_pkt_info[i].timestamp));
+        fprintf(fp, "%u %lu\n", rte_be_to_cpu_32(traffic_pkt_info[i].flag), rte_be_to_cpu_64(traffic_pkt_info[i].timestamp));
     }
 
     fclose(fp);
@@ -297,7 +303,7 @@ static void analyze_gen_info()
     }
     for (int i = 0; i < traffic_pkt_idx; i++)
     {
-        fprintf(fp, "%u %lu\n", rte_be_to_cpu_16(gen_pkt_info[i].flag), rte_be_to_cpu_64(gen_pkt_info[i].timestamp));
+        fprintf(fp, "%u %u %lu\n", rte_be_to_cpu_32(gen_pkt_info[i].flag), rte_be_to_cpu_32(gen_pkt_info[i].notify), rte_be_to_cpu_64(gen_pkt_info[i].timestamp));
     }
     fclose(fp);
 }
@@ -388,16 +394,16 @@ static void receive_gen_packets_main_loop(uint16_t port_id){
             struct rte_ether_hdr *eth_hdr;
             struct rte_ipv4_hdr *ip_hdr;
             struct rte_udp_hdr *udp_hdr;
-            flag_header_t *flag_hdr;
+            notify_header_t *noti_hdr;
 
             eth_hdr = rte_pktmbuf_mtod(pkts[i], struct rte_ether_hdr *);
             ip_hdr = (struct rte_ipv4_hdr *)(eth_hdr + 1);
             udp_hdr = (struct rte_udp_hdr *)(ip_hdr + 1);
-            flag_hdr = (flag_header_t *)(udp_hdr + 1);
+            noti_hdr = (notify_header_t *)(udp_hdr + 1);
 
             /* Store the math header information */
-            gen_pkt_info[gen_pkt_idx].flag =  flag_hdr->flag;// need to convert to host byte order
-            gen_pkt_info[gen_pkt_idx].timestamp = flag_hdr->timestamp;
+            gen_pkt_info[gen_pkt_idx].flag =  noti_hdr->flag;// need to convert to host byte order
+            gen_pkt_info[gen_pkt_idx].timestamp = noti_hdr->timestamp;
             
             gen_pkt_idx++;
 

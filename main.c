@@ -188,6 +188,8 @@ void init_port(int portid)
         rte_exit(EXIT_FAILURE, "rte_eth_dev_start:err=%d, port=%u\n",
                  ret, portid);
 
+    rte_eth_promiscuous_enable(portid);
+
     rte_log(RTE_LOG_DEBUG, RTE_LOGTYPE_TRAFFIC_GEN, "Initialize port %u done.\n", portid);
 }
 
@@ -305,7 +307,7 @@ static void traffic_generator_main_loop(uint16_t port_id)
         // calculate a*b
         for (int i = 0; i < nb_pkts; i++) {
             math_header_t *math_hdr = (math_header_t *)(rte_pktmbuf_mtod(pkts[i], char *) + sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr));
-            math_hdr->res = rte_be_to_cpu_16(math_hdr->a) * rte_be_to_cpu_16(math_hdr->b);
+            math_hdr->res = rte_cpu_to_be_32(rte_be_to_cpu_16(math_hdr->a) * rte_be_to_cpu_16(math_hdr->b));
         }
         
         /* Send the burst */
@@ -322,9 +324,9 @@ static void traffic_generator_main_loop(uint16_t port_id)
         
     }
     
-    // duration_sec = (float)(rte_rdtsc() - start_tsc) / rte_get_tsc_hz();
-    // printf("Traffic generation complete. Sent %lu packets in %.2f seconds (%.2f Mpps)\n", 
-    //        total_sent, duration_sec, total_sent / 1000000.0 / duration_sec);
+    duration_sec = (float)(rte_rdtsc() - start_tsc) / rte_get_tsc_hz();
+    printf("Traffic generation complete. Sent %lu packets in %.2f seconds (%.2f Mpps)\n", 
+           total_sent, duration_sec, total_sent / 1000000.0 / duration_sec);
 }
 
 static int generator_launch_one_lcore(__attribute__((unused)) void *dummy)
